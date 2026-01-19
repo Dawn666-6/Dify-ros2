@@ -1,0 +1,86 @@
+from flask import Flask, request, jsonify
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+import threading
+import time
+
+# 1. 初始化Flask应用
+app = Flask(__name__)
+
+# 2. 定义ROS 2节点类（继承rclpy.node.Node）
+class DifyRos2PublisherNode(Node):
+    def __init__(self):
+        # 初始化ROS 2节点，节点名称：dify_ros2_humble_middleware_node
+        super().__init__("dify_ros2_humble_middleware_node")
+        # 创建ROS 2发布者：话题名称/dify_ros2_command、消息类型String、队列大小10
+        self.dify_ros2_pub = self.create_publisher(String, "/dify_ros2_command", 10)
+        self.get_logger().info("ROS 2节点初始化成功，发布者已创建，话题：/dify_ros2_command")
+
+    def publish_command(self, command):
+        """发布命令到ROS 2话题"""
+        if not rclpy.ok():
+            return False
+        ros2_msg = String()
+        ros2_msg.data = command
+        self.dify_ros2_pub.publish(ros2_msg)
+        self.get_logger().info(f"命令已转发至ROS 2系统：{command}")
+        return True
+
+# 3. 全局变量：ROS 2节点实例
+ros2_publisher_node = None
+
+# 4. ROS 2节点运行线程函数
+def init_ros2_node():
+    global ros2_publisher_node
+    try:
+        # 初始化rclpy
+        rclpy.init()
+        # 创建发布者节点实例
+        ros2_publisher_node = DifyRos2PublisherNode()
+        # 保持ROS 2节点运行（阻塞线程，直到rclpy关闭）
+        rclpy.spin(ros2_publisher_node)
+    except Exception as e:
+        print(f"ROS 2节点运行异常：{str(e)}")
+    finally:
+        # 关闭ROS 2节点，释放资源
+        if ros2_publisher_node:
+            ros2_publisher_node.destroy_node()
+        rclpy.shutdown()
+
+# 5. Flask接口：接收Dify发送的命令（POST请求，JSON格式）
+@app.route("/send_dify_command", methods=["POST"])
+def receive_dify_command():
+    global ros2_publisher_node
+    try:
+        # 5.1 解析Dify发送的JSON请求体
+        request_data = request.get_json()
+        if not request_data or "command" not in request_data:
+            return jsonify({"code": 400, "msg": "请求格式错误，缺少command字段"}), 400
+        
+        # 5.2 提取Dify命令
+        dify_command = request_data["command"]
+        print(f"成功接收Dify命令：{dify_command}")
+
+        # 5.3 转发命令到ROS 2系统
+        if ros2_publisher_node and rclpy.ok():
+            publish_success = ros2_publisher_node.publish_command(dify_command)
+            if publish_success:
+                return jsonify({"code": 200, "msg": "命令接收并转发成功", "command": dify_command}), 200
+            else:
+                return jsonify({"code": 503, "msg": "ROS 2节点未就绪，无法转发命令"}), 503
+        else:
+            return jsonify({"code": 503, "msg": "ROS 2发布者未初始化，无法转发命令"}), 503
+    
+    except Exception as e:
+        return jsonify({"code": 500, "msg": f"服务器内部错误：{str(e)}"}), 500
+
+# 6. 启动多线程（Flask服务 + ROS 2节点）
+if __name__ == "__main__":
+    # 6.1 启动ROS 2节点线程（后台运行）
+    ros2_thread = threading.Thread(target=init_ros2_node, daemon=True)
+    ros2_thread.start()
+    # 6.2 等待2秒，确保ROS 2节点初始化完成
+    time.sleep(2)
+    # 6.3 启动Flask HTTP服务（允许外部访问，端口5000）
+    app.run(host="0.0.0.0", port=5000, debug=False)
